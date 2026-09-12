@@ -1,0 +1,15 @@
+GITHUB_CLIENT_ID=<your github oauth app client id>
+GITHUB_CLIENT_SECRET=<your github oauth app client secret>
+COOKIE_ENCRYPTION_KEY=<random string, e.g. `openssl rand -hex 32`>
+
+# Exactly one GitHub login allowed to complete auth and use the tools.
+ALLOWED_GITHUB_LOGIN=<your github username>
+
+# Supabase project the `pulse` schema lives in (dashboard -> Settings -> API).
+SUPABASE_URL=<https://xxxx.supabase.co>
+SUPABASE_ANON_KEY=<anon / public key>
+
+# Dedicated Supabase Auth user for this Worker (Authentication -> Users ->
+# Add user). Do not reuse the PWA's own login. See MCP-HEALTH-COACH-PLAN.md §2B.
+SUPABASE_COACH_EMAIL=<coach auth user email>
+SUPABASE_COACH_PASSWORD=<coach auth user password>
