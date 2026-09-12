@@ -115,8 +115,9 @@ single night, or flattened (`workouts`), never returned raw across a range.
 | `get_night_detail` | Deep-dive on one specific night, incl. hypnogram/curve/workouts | `night` (date) | `select *` from `night_summary where night = :night` |
 | `get_workouts` | Trend/comparison across workouts — "how was my last run vs the one before" | `since`, `until` (date, default last 90d), `type` (optional, e.g. `RUNNING`/`WEIGHTS`) | `select night, workouts from night_summary where workouts is not null and night between :since and :until`, flattened one row per workout in the Worker, filtered by `type` if given |
 | `get_hr_curve` | Just the overnight HR curve for one night, without the rest of the row | `night` (date) | `select night, hr_curve from night_summary where night = :night` |
-| `get_drinks` | Raw drink log for a date range | `since` (date), `until` (date, optional) | `select * from drinks where night >= :since [and night <= :until] order by logged_at desc` |
-| `get_dose_response` | The project's flagship analysis: drinks vs next-morning physiology | `since`/`until` (date range) or `days` (trailing count, default 90) | `select night, std_drinks, hrv_pct_baseline, rhr_delta, sleep_score, body_load from night_summary where night between :since and :until order by night` |
+| `get_drinks` | Raw drink log for a date range | `since`, `until` (date, both optional, default last 90d) | `select * from drinks where night between :since and :until order by logged_at desc` |
+| `get_dose_response` | The project's flagship analysis: drinks vs next-morning physiology | `since`, `until` (date, both optional, default last 90d) | `select night, std_drinks, hrv_pct_baseline, rhr_delta, sleep_score, body_load from night_summary where night between :since and :until order by night` |
+| `get_period_summary` | Aggregated period stats in one call — total/avg drinks, avg sleep score, HRV% split by drinking vs sober nights, avg body load, workout counts by type — plus the same-length prior period and a delta. Answers "how much did I drink last month and how did I recover" without the caller summing raw rows | `since`, `until` (date, default last 30d), `compare_to_previous` (bool, default true) | fetches the same night_summary rows `get_dose_response` would, aggregates in the Worker (no new SQL) |
 | `get_sync_status` | "Why don't you see last night's data" | none | `select * from sync_state where id = 1` |
 
 Notes:
@@ -213,3 +214,19 @@ Notes:
   that's demonstrably too slow.
 - No new Postgres views/RPCs — `night_summary` already covers it.
 - No multi-user support — the OAuth allowlist is exactly one GitHub account.
+
+## 7. Candidate v2 features (not built, worth a deliberate yes before building)
+
+- **Streaks**: "days since last drink," "current sober streak," "longest
+  streak of sleep_score above N" — cheap to compute from data already
+  returned by `get_dose_response`/`get_recent_nights`, mostly a UX/framing
+  question of whether it's worth a dedicated tool vs letting the coach derive
+  it from a fetched range.
+- **Workout personal records**: fastest pace / longest duration / highest
+  avg HR per workout type, all-time or within a range — extends
+  "last run vs previous" (already supported) to "last run vs my best run."
+- **A write tool (log a drink via the coach)**: the one candidate that
+  reverses a deliberate v1 decision (§6) rather than extending it — needs an
+  explicit choice, not a default addition, since it changes what the coach
+  auth user's already-broader-than-needed RLS grants (§2B) actually get used
+  for. If built, scope it to exactly one insert-shaped tool, nothing else.
