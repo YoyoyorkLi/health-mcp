@@ -18,12 +18,27 @@ type SupabaseSession = {
 
 let cachedSession: SupabaseSession | null = null;
 
+// Two tool calls landing close together with no cached (or expired) session
+// would otherwise both pass the cache check before either's fetch resolves,
+// firing duplicate sign-ins. Coalescing onto one in-flight promise means the
+// second caller awaits the first's request instead of starting its own.
+let signInPromise: Promise<string> | null = null;
+
 async function signIn(env: Env): Promise<string> {
 	const now = Date.now();
 	if (cachedSession && cachedSession.expiresAt - 30_000 > now) {
 		return cachedSession.accessToken;
 	}
 
+	if (!signInPromise) {
+		signInPromise = doSignIn(env).finally(() => {
+			signInPromise = null;
+		});
+	}
+	return signInPromise;
+}
+
+async function doSignIn(env: Env): Promise<string> {
 	const res = await fetch(`${env.SUPABASE_URL}/auth/v1/token?grant_type=password`, {
 		method: "POST",
 		headers: {
@@ -43,15 +58,34 @@ async function signIn(env: Env): Promise<string> {
 	const data = (await res.json()) as { access_token: string; expires_in: number };
 	cachedSession = {
 		accessToken: data.access_token,
-		expiresAt: now + data.expires_in * 1000,
+		expiresAt: Date.now() + data.expires_in * 1000,
 	};
 	return cachedSession.accessToken;
 }
 
 /**
- * GET against PostgREST. `query` is everything after `night_summary?` --
- * e.g. `select=night,std_drinks&order=night.desc&limit=14`.
+ * Build a PostgREST query string from `[key, value]` pairs, e.g.
+ * `[["select", "night,workouts"], ["night", "gte.2026-01-01"]]` ->
+ * `select=night%2Cworkouts&night=gte.2026-01-01`.
+ *
+ * Pairs, not an object: PostgREST ANDs repeated filters on the same column
+ * (`night=gte.X&night=lte.Y` means "between X and Y"), which a plain object
+ * can't represent since its keys must be unique.
+ *
+ * Every value is encoded via URLSearchParams -- earlier versions of this
+ * client built query strings with raw template-literal interpolation, which
+ * was only safe because every caller happened to validate its inputs first.
+ * This is the actual defense: a value containing `&`/`=`/etc. can no longer
+ * break or redirect the query, regardless of what validation a future tool
+ * does or doesn't add upstream.
  */
+export function buildQuery(params: Array<[string, string]>): string {
+	const search = new URLSearchParams();
+	for (const [key, value] of params) search.append(key, value);
+	return search.toString();
+}
+
+/** GET against PostgREST. `resource` is the table/view, `query` from buildQuery(). */
 export async function pgrest(env: Env, resource: string, query: string): Promise<any> {
 	const token = await signIn(env);
 	const res = await fetch(`${env.SUPABASE_URL}/rest/v1/${resource}?${query}`, {

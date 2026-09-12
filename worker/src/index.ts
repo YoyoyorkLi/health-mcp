@@ -6,7 +6,7 @@ import { registerPulseTools } from "./pulse-tools";
 
 // Context from the auth process, encrypted & stored in the auth token and
 // provided to the DurableMCP as this.props
-type Props = {
+export type Props = {
 	login: string;
 	name: string;
 	email: string;
@@ -25,11 +25,18 @@ export class PulseCoachMCP extends McpAgent<Env, Record<string, never>, Props> {
 		// be unreachable with a non-matching login. Checked again here so a
 		// bug in that gate fails closed (no tools registered) rather than
 		// open (every GitHub user gets read access to the drinking log).
+		//
+		// This alone isn't enough, though: init() only re-runs when the
+		// Durable Object (re)starts, not on every request, so it can't revoke
+		// an already-warm session if ALLOWED_GITHUB_LOGIN is rotated later.
+		// registerPulseTools() re-checks on every actual tool call to close
+		// that gap -- this is the fail-closed check for a session that was
+		// never valid in the first place.
 		if (this.props!.login !== this.env.ALLOWED_GITHUB_LOGIN) {
 			return;
 		}
 
-		registerPulseTools(this.server, this.env);
+		registerPulseTools(this.server, this.env, this.props!);
 	}
 }
 
