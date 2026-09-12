@@ -25,9 +25,14 @@ function chicagoToday(): string {
 }
 
 function daysAgo(n: number): string {
-	const [y, m, d] = chicagoToday().split("-").map(Number);
+	return addDays(chicagoToday(), -n);
+}
+
+/** Add (or subtract, for negative n) n calendar days to a YYYY-MM-DD date string. */
+function addDays(date: string, n: number): string {
+	const [y, m, d] = date.split("-").map(Number);
 	const civil = new Date(Date.UTC(y, m - 1, d));
-	civil.setUTCDate(civil.getUTCDate() - n);
+	civil.setUTCDate(civil.getUTCDate() + n);
 	return civil.toISOString().slice(0, 10);
 }
 
@@ -62,6 +67,74 @@ function textResult(data: unknown) {
 // night_summary comes along automatically via select=* -- no hardcoded
 // column list to keep in sync as the view grows new columns.
 const JSONB_BLOB_COLUMNS = ["hr_curve", "stages", "zone_min", "workouts"] as const;
+
+type SummaryRow = {
+	night: string;
+	std_drinks: number;
+	sleep_score: number | null;
+	hrv_pct_baseline: number | null;
+	body_load: number | null;
+	workouts: Array<{ type: string; min: number }> | null;
+};
+
+function round1(n: number): number {
+	return Math.round(n * 10) / 10;
+}
+
+function avg(values: Array<number | null | undefined>): number | null {
+	const nums = values.filter((v): v is number => v != null);
+	return nums.length ? round1(nums.reduce((a, b) => a + b, 0) / nums.length) : null;
+}
+
+/**
+ * One period's stats, computed in the Worker rather than a Postgres
+ * aggregate query -- no new SQL/RPC needed, and it's the kind of ad hoc
+ * aggregation the plan doc flags as worth hand-computing per request until
+ * it's demonstrably needed server-side.
+ */
+function summarize(rows: SummaryRow[]) {
+	const drinkingNights = rows.filter((r) => r.std_drinks > 0);
+	const soberNights = rows.filter((r) => r.std_drinks === 0);
+
+	const workoutCounts: Record<string, number> = {};
+	let totalWorkoutMin = 0;
+	for (const row of rows) {
+		for (const w of row.workouts ?? []) {
+			workoutCounts[w.type] = (workoutCounts[w.type] ?? 0) + 1;
+			totalWorkoutMin += w.min ?? 0;
+		}
+	}
+
+	return {
+		nights: rows.length,
+		total_std_drinks: round1(rows.reduce((sum, r) => sum + (r.std_drinks ?? 0), 0)),
+		drinking_nights: drinkingNights.length,
+		sober_nights: soberNights.length,
+		avg_sleep_score: avg(rows.map((r) => r.sleep_score)),
+		avg_hrv_pct_baseline: avg(rows.map((r) => r.hrv_pct_baseline)),
+		avg_hrv_pct_baseline_drinking_nights: avg(drinkingNights.map((r) => r.hrv_pct_baseline)),
+		avg_hrv_pct_baseline_sober_nights: avg(soberNights.map((r) => r.hrv_pct_baseline)),
+		avg_body_load: avg(rows.map((r) => r.body_load)),
+		total_workout_min: totalWorkoutMin,
+		workout_counts_by_type: workoutCounts,
+	};
+}
+
+/** current-minus-previous for every numeric field two summaries share. */
+function diffSummaries(
+	current: Record<string, unknown>,
+	previous: Record<string, unknown>,
+): Record<string, number> {
+	const delta: Record<string, number> = {};
+	for (const key of Object.keys(current)) {
+		const a = current[key];
+		const b = previous[key];
+		if (typeof a === "number" && typeof b === "number") {
+			delta[key] = round1(a - b);
+		}
+	}
+	return delta;
+}
 
 export function registerPulseTools(server: McpServer, env: Env, props: AuthProps) {
 	// Re-checked on every tool call, not just when the Durable Object starts:
@@ -240,6 +313,54 @@ export function registerPulseTools(server: McpServer, env: Env, props: AuthProps
 				]),
 			);
 			return textResult(rows);
+		},
+	);
+
+	server.tool(
+		"get_period_summary",
+		"Aggregated stats for a period in one call: total/average drinks, average sleep score, HRV vs baseline (overall, and split by drinking vs sober nights -- the project's flagship comparison), average body load, and workout counts by type. Answers 'how much did I drink last month and how did I recover' directly, without summing raw rows by hand. Defaults to comparing against the immediately-prior period of the same length -- set compare_to_previous to false to skip that.",
+		{
+			since: dateSchema.optional().describe("Start of range, inclusive. Default: 30 days ago"),
+			until: dateSchema.optional().describe("End of range, inclusive. Default: today"),
+			compare_to_previous: z
+				.boolean()
+				.default(true)
+				.describe("Also compute the same-length immediately-prior period and a delta against it"),
+		},
+		async ({ since, until, compare_to_previous }) => {
+			assertStillAllowed();
+			const { from, to } = resolveRange(since, until, 30);
+			assertSpan(from, to);
+
+			const fetchRows = (rangeFrom: string, rangeTo: string) =>
+				pgrest(
+					env,
+					"night_summary",
+					buildQuery([
+						["select", "night,std_drinks,sleep_score,hrv_pct_baseline,body_load,workouts"],
+						["night", `gte.${rangeFrom}`],
+						["night", `lte.${rangeTo}`],
+					]),
+				) as Promise<SummaryRow[]>;
+
+			const current = summarize(await fetchRows(from, to));
+
+			if (!compare_to_previous) {
+				return textResult({ range: { from, to }, current });
+			}
+
+			const spanDays = Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000) + 1;
+			const prevTo = addDays(from, -1);
+			const prevFrom = addDays(prevTo, -(spanDays - 1));
+			const previous = summarize(await fetchRows(prevFrom, prevTo));
+
+			return textResult({
+				range: { from, to },
+				current,
+				previous_range: { from: prevFrom, to: prevTo },
+				previous,
+				delta: diffSummaries(current, previous),
+			});
 		},
 	);
 
