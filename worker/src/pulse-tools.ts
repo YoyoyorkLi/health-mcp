@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { ATHLETE_PROFILE } from "./profile";
 import { buildQuery, pgrest } from "./supabase";
 
 type AuthProps = { login: string };
@@ -150,6 +151,16 @@ export function registerPulseTools(server: McpServer, env: Env, props: AuthProps
 			throw new Error("Forbidden: this session's GitHub login is no longer on the allowlist.");
 		}
 	}
+
+	server.tool(
+		"get_athlete_profile",
+		"Background on who this coach is for: age, training goals (including the upcoming half marathon target), current injury/rehab status, and how to treat the drinking data. Static and hand-maintained -- check `as_of` for how current it is. Call this early in a conversation, or whenever it would sharpen advice, so recommendations account for goals and constraints instead of just raw physiology numbers.",
+		{},
+		async () => {
+			assertStillAllowed();
+			return textResult(ATHLETE_PROFILE);
+		},
+	);
 
 	server.tool(
 		"get_recent_nights",

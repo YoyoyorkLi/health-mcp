@@ -111,6 +111,7 @@ single night, or flattened (`workouts`), never returned raw across a range.
 
 | Tool | Purpose | Params | Backing query |
 |---|---|---|---|
+| `get_athlete_profile` | Static context on who the coach is for — age, training goals, injury/rehab status, how to treat the drinking data | none | none — hand-maintained constant in `src/profile.ts`, not a Supabase query |
 | `get_recent_nights` | Trend data for "how have I been sleeping/recovering lately" | `n_nights` (default 14) | scalar columns only (no `hr_curve`/`stages`/`zone_min`/`workouts`) from `night_summary`, `order by night desc limit n_nights` |
 | `get_night_detail` | Deep-dive on one specific night, incl. hypnogram/curve/workouts | `night` (date) | `select *` from `night_summary where night = :night` |
 | `get_workouts` | Trend/comparison across workouts — "how was my last run vs the one before" | `since`, `until` (date, default last 90d), `type` (optional, e.g. `RUNNING`/`WEIGHTS`) | `select night, workouts from night_summary where workouts is not null and night between :since and :until`, flattened one row per workout in the Worker, filtered by `type` if given |
@@ -131,10 +132,17 @@ Notes:
   Some types (`WEIGHTS`) are sparse (1 in 180 days) — a "vs previous lift"
   question may need a wider `since` than the 90-day default to find a second
   data point.
-- Column list for `get_recent_nights` / `get_dose_response`: hardcoded in
-  `pulse-tools.ts` from `night_summary`'s definition as of this build. If the
-  view grows a new column via a future migration, update the column list
-  there — this doc won't drift, but the constant will need a manual bump.
+- `get_recent_nights` uses `select=*` and drops the 4 jsonb columns
+  client-side rather than hardcoding the scalar column list — it and
+  `get_dose_response`'s explicit column list (which *is* still hardcoded,
+  deliberately, since it's a small fixed analysis shape rather than "give me
+  everything") are automatically current with `night_summary` either way.
+- `get_athlete_profile` is a hand-maintained constant (`src/profile.ts`), not
+  a Supabase query — it's a fact sheet (age, training goals, injury status,
+  how to treat the drinking data), not derived data. It carries an `as_of`
+  date instead of a hardcoded age specifically so staleness is visible
+  rather than silently trusted; update the file (and bump `as_of`) whenever
+  any of it changes — the half marathon date, a new injury, a goal met.
 - `night` is a `date`, already bucketed to the 4am/America-Chicago
   convention described in `schema.sql`'s `drink_night()` comment. Don't
   re-derive or re-bucket it client-side — trust the column.

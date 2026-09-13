@@ -15,14 +15,13 @@ persona that can check real data before answering — "how was my last run
 compared to the one before," "how much did I drink last month and how did I
 recover," "why don't you see last night's data yet."
 
-```
-Claude.ai  --OAuth (GitHub, allowlisted to one account)-->  Cloudflare Worker
-                                                                    |
-                                                     signs in to Supabase Auth,
-                                                     queries PostgREST
-                                                                    v
-                                                          Supabase (pulse project)
-```
+![Architecture: Claude connects over MCP to a Cloudflare Worker, which contains an OAuth provider (one-time GitHub login, gated to one account) and the PulseCoachMCP Durable Object (9 read-only tools). The Durable Object signs in to Supabase with a password login and queries it via PostgREST.](docs/architecture.svg)
+
+The GitHub OAuth login only happens once, when the connector is first added —
+it's how the Worker identifies who's connecting, checked against an allowlist
+of one account. Every tool call after that runs on tokens; the Worker
+separately logs itself into Supabase with a plain password (not OAuth,
+invisible to you) to actually read the data.
 
 Runs entirely on free tiers (Cloudflare Workers, the existing Supabase
 project). No servers to manage.
@@ -31,6 +30,7 @@ project). No servers to manage.
 
 | Tool | Answers |
 |---|---|
+| `get_athlete_profile` | Who is this coach for — age, training goals, injury status, how to treat the drinking data |
 | `get_recent_nights` | How have I been sleeping/recovering lately? |
 | `get_night_detail` | Full detail on one specific night |
 | `get_workouts` | My workouts over a range, filterable by type — for "last run vs the one before" |
