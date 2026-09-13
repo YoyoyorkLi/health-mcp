@@ -31,6 +31,7 @@ project). No servers to manage.
 | Tool | Answers |
 |---|---|
 | `get_athlete_profile` | Who is this coach for — age, training goals, injury status, how to treat the drinking data |
+| `get_training_plan` | The actual half-marathon build — phases, HR-zone targets, the week-24 goal checkpoint |
 | `get_recent_nights` | How have I been sleeping/recovering lately? |
 | `get_night_detail` | Full detail on one specific night |
 | `get_workouts` | My workouts over a range, filterable by type — for "last run vs the one before" |
