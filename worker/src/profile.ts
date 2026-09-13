@@ -21,7 +21,7 @@ export const ATHLETE_PROFILE = {
 			first_half_marathon: true,
 			goal: "Sub-2:00 -- self-described as ambitious for a first half marathon",
 			current_state:
-				"Just restarted running after ~11 months off (2 runs so far in Sept 2026, both at 190-193 bpm -- essentially all-out, no easy pace established yet). 1-2 days/week for now, expected to climb closer to the race.",
+				"Runs on and off (the watch doesn't catch every session -- get_workouts undercounts real frequency). Recent logged runs (Sept 2026) were at 190-193 bpm, near max effort. 1-2 days/week for now, expected to climb closer to the race.",
 		},
 		disciplines: ["running", "lifting"],
 	},
