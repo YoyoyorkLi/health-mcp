@@ -111,8 +111,7 @@ single night, or flattened (`workouts`), never returned raw across a range.
 
 | Tool | Purpose | Params | Backing query |
 |---|---|---|---|
-| `get_athlete_profile` | Static context on who the coach is for — age, training goals, injury/rehab status, how to treat the drinking data | none | none — hand-maintained constant in `src/profile.ts`, not a Supabase query |
-| `get_training_plan` | The structured half-marathon build — phases, dates, weekly frequency, HR-zone targets, the week-24 goal decision point | none | none — hand-maintained constant in `src/profile.ts`, not a Supabase query |
+| `get_athlete_profile` | Static context on who the coach is for — age, training goals (incl. current training state), injury/rehab status, how to treat the drinking data | none | none — hand-maintained constant in `src/profile.ts`, not a Supabase query |
 | `get_recent_nights` | Trend data for "how have I been sleeping/recovering lately" | `n_nights` (default 14) | scalar columns only (no `hr_curve`/`stages`/`zone_min`/`workouts`) from `night_summary`, `order by night desc limit n_nights` |
 | `get_night_detail` | Deep-dive on one specific night, incl. hypnogram/curve/workouts | `night` (date) | `select *` from `night_summary where night = :night` |
 | `get_workouts` | Trend/comparison across workouts — "how was my last run vs the one before" | `since`, `until` (date, default last 90d), `type` (optional, e.g. `RUNNING`/`WEIGHTS`) | `select night, workouts from night_summary where workouts is not null and night between :since and :until`, flattened one row per workout in the Worker, filtered by `type` if given |

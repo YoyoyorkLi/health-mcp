@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { ATHLETE_PROFILE, TRAINING_PLAN } from "./profile";
+import { ATHLETE_PROFILE } from "./profile";
 import { buildQuery, pgrest } from "./supabase";
 
 type AuthProps = { login: string };
@@ -159,16 +159,6 @@ export function registerPulseTools(server: McpServer, env: Env, props: AuthProps
 		async () => {
 			assertStillAllowed();
 			return textResult(ATHLETE_PROFILE);
-		},
-	);
-
-	server.tool(
-		"get_training_plan",
-		"The structured half-marathon build: phases with date ranges, weekly frequency, HR-zone targets (derived from real hrmax), session focus, and the week-24 decision point on whether the sub-2:00 goal is on track. Static and hand-maintained -- check `as_of` and `current_phase`. Call this before giving any training/pacing/scheduling advice so it matches the actual plan instead of being invented fresh each conversation.",
-		{},
-		async () => {
-			assertStillAllowed();
-			return textResult(TRAINING_PLAN);
 		},
 	);
 
