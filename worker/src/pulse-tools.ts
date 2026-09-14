@@ -1,5 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { addDays, assertSpan, diffSummaries, resolveRange, summarize } from "./logic";
+import type { SummaryRow } from "./logic";
 import { ATHLETE_PROFILE } from "./profile";
 import { buildQuery, pgrest } from "./supabase";
 
@@ -13,51 +15,6 @@ const dateSchema = z
 	.iso.date()
 	.describe("Date in YYYY-MM-DD form, bucketed to the project's 4am/America-Chicago night convention");
 
-const NIGHT_TZ = "America/Chicago";
-
-// "Today" and "N days ago" as the project's own civil date, not UTC's. The
-// `night` column is bucketed on a 4am America/Chicago cutoff (see
-// schema.sql's drink_night()), so a UTC-based default would drift by a full
-// day for the ~5-6 hours per day that Chicago's evening is already
-// tomorrow in UTC. Mirrors drink_night()'s own rule: convert to wall clock
-// FIRST, then do arithmetic on the civil date -- never on a real-time Date.
-function chicagoToday(): string {
-	return new Date().toLocaleDateString("en-CA", { timeZone: NIGHT_TZ }); // en-CA -> YYYY-MM-DD
-}
-
-function daysAgo(n: number): string {
-	return addDays(chicagoToday(), -n);
-}
-
-/** Add (or subtract, for negative n) n calendar days to a YYYY-MM-DD date string. */
-function addDays(date: string, n: number): string {
-	const [y, m, d] = date.split("-").map(Number);
-	const civil = new Date(Date.UTC(y, m - 1, d));
-	civil.setUTCDate(civil.getUTCDate() + n);
-	return civil.toISOString().slice(0, 10);
-}
-
-/** Resolve a since/until pair against a shared default-days fallback. */
-function resolveRange(
-	since: string | undefined,
-	until: string | undefined,
-	defaultDays: number,
-): { from: string; to: string } {
-	return { from: since ?? daysAgo(defaultDays), to: until ?? chicagoToday() };
-}
-
-const MAX_SPAN_DAYS = 730; // ~2 years
-
-/** Guard against a caller requesting an unbounded range of large payloads. */
-function assertSpan(from: string, to: string) {
-	const days = Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000);
-	if (days > MAX_SPAN_DAYS) {
-		throw new Error(
-			`Range too wide (${days} days, max ${MAX_SPAN_DAYS}). Narrow \`since\`/\`until\` and query in batches instead.`,
-		);
-	}
-}
-
 function textResult(data: unknown) {
 	return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
 }
@@ -69,75 +26,7 @@ function textResult(data: unknown) {
 // column list to keep in sync as the view grows new columns.
 const JSONB_BLOB_COLUMNS = ["hr_curve", "stages", "zone_min", "workouts"] as const;
 
-type SummaryRow = {
-	night: string;
-	std_drinks: number;
-	sleep_score: number | null;
-	hrv_pct_baseline: number | null;
-	body_load: number | null;
-	workouts: Array<{ type: string; min: number }> | null;
-};
-
-function round1(n: number): number {
-	return Math.round(n * 10) / 10;
-}
-
-function avg(values: Array<number | null | undefined>): number | null {
-	const nums = values.filter((v): v is number => v != null);
-	return nums.length ? round1(nums.reduce((a, b) => a + b, 0) / nums.length) : null;
-}
-
-/**
- * One period's stats, computed in the Worker rather than a Postgres
- * aggregate query -- no new SQL/RPC needed, and it's the kind of ad hoc
- * aggregation the plan doc flags as worth hand-computing per request until
- * it's demonstrably needed server-side.
- */
-function summarize(rows: SummaryRow[]) {
-	const drinkingNights = rows.filter((r) => r.std_drinks > 0);
-	const soberNights = rows.filter((r) => r.std_drinks === 0);
-
-	const workoutCounts: Record<string, number> = {};
-	let totalWorkoutMin = 0;
-	for (const row of rows) {
-		for (const w of row.workouts ?? []) {
-			workoutCounts[w.type] = (workoutCounts[w.type] ?? 0) + 1;
-			totalWorkoutMin += w.min ?? 0;
-		}
-	}
-
-	return {
-		nights: rows.length,
-		total_std_drinks: round1(rows.reduce((sum, r) => sum + (r.std_drinks ?? 0), 0)),
-		drinking_nights: drinkingNights.length,
-		sober_nights: soberNights.length,
-		avg_sleep_score: avg(rows.map((r) => r.sleep_score)),
-		avg_hrv_pct_baseline: avg(rows.map((r) => r.hrv_pct_baseline)),
-		avg_hrv_pct_baseline_drinking_nights: avg(drinkingNights.map((r) => r.hrv_pct_baseline)),
-		avg_hrv_pct_baseline_sober_nights: avg(soberNights.map((r) => r.hrv_pct_baseline)),
-		avg_body_load: avg(rows.map((r) => r.body_load)),
-		total_workout_min: totalWorkoutMin,
-		workout_counts_by_type: workoutCounts,
-	};
-}
-
-/** current-minus-previous for every numeric field two summaries share. */
-function diffSummaries(
-	current: Record<string, unknown>,
-	previous: Record<string, unknown>,
-): Record<string, number> {
-	const delta: Record<string, number> = {};
-	for (const key of Object.keys(current)) {
-		const a = current[key];
-		const b = previous[key];
-		if (typeof a === "number" && typeof b === "number") {
-			delta[key] = round1(a - b);
-		}
-	}
-	return delta;
-}
-
-export function registerPulseTools(server: McpServer, env: Env, props: AuthProps) {
+export function registerPulseTools(server: McpServer, env: Env, props: AuthProps, storage: DurableObjectStorage) {
 	// Re-checked on every tool call, not just when the Durable Object starts:
 	// ALLOWED_GITHUB_LOGIN can be rotated (e.g. to revoke a compromised
 	// account) via `wrangler secret put` + redeploy, and env bindings are
@@ -178,6 +67,7 @@ export function registerPulseTools(server: McpServer, env: Env, props: AuthProps
 			assertStillAllowed();
 			const rows = await pgrest(
 				env,
+				storage,
 				"night_summary",
 				buildQuery([
 					["select", "*"],
@@ -200,6 +90,7 @@ export function registerPulseTools(server: McpServer, env: Env, props: AuthProps
 			assertStillAllowed();
 			const rows = await pgrest(
 				env,
+				storage,
 				"night_summary",
 				buildQuery([
 					["select", "*"],
@@ -246,7 +137,7 @@ export function registerPulseTools(server: McpServer, env: Env, props: AuthProps
 			if (type) {
 				filters.push(["workouts", `cs.[{"type":"${type.toUpperCase()}"}]`]);
 			}
-			const rows = await pgrest(env, "night_summary", buildQuery(filters));
+			const rows = await pgrest(env, storage, "night_summary", buildQuery(filters));
 
 			const wantType = type?.toLowerCase();
 			const flattened = (rows as Array<{ night: string; workouts: any[] }>).flatMap((row) =>
@@ -267,6 +158,7 @@ export function registerPulseTools(server: McpServer, env: Env, props: AuthProps
 			assertStillAllowed();
 			const rows = await pgrest(
 				env,
+				storage,
 				"night_summary",
 				buildQuery([
 					["select", "night,hr_curve"],
@@ -290,6 +182,7 @@ export function registerPulseTools(server: McpServer, env: Env, props: AuthProps
 			assertSpan(from, to);
 			const rows = await pgrest(
 				env,
+				storage,
 				"drinks",
 				buildQuery([
 					["select", "*"],
@@ -315,6 +208,7 @@ export function registerPulseTools(server: McpServer, env: Env, props: AuthProps
 			assertSpan(from, to);
 			const rows = await pgrest(
 				env,
+				storage,
 				"night_summary",
 				buildQuery([
 					["select", "night,std_drinks,hrv_pct_baseline,rhr_delta,sleep_score,body_load"],
@@ -346,6 +240,7 @@ export function registerPulseTools(server: McpServer, env: Env, props: AuthProps
 			const fetchRows = (rangeFrom: string, rangeTo: string) =>
 				pgrest(
 					env,
+					storage,
 					"night_summary",
 					buildQuery([
 						["select", "night,std_drinks,sleep_score,hrv_pct_baseline,body_load,workouts"],
@@ -383,6 +278,7 @@ export function registerPulseTools(server: McpServer, env: Env, props: AuthProps
 			assertStillAllowed();
 			const rows = await pgrest(
 				env,
+				storage,
 				"sync_state",
 				buildQuery([
 					["select", "*"],

@@ -36,7 +36,7 @@ export class PulseCoachMCP extends McpAgent<Env, Record<string, never>, Props> {
 			return;
 		}
 
-		registerPulseTools(this.server, this.env, this.props!);
+		registerPulseTools(this.server, this.env, this.props!, this.ctx.storage);
 	}
 }
 

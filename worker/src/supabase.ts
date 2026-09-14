@@ -6,17 +6,22 @@
 // sync_state/night_summary grants `select` to `authenticated` only -- the
 // anon key alone cannot read any of this.
 //
-// The access token is cached at module scope for the lifetime of the Worker
-// isolate. No refresh-token handling: a fresh sign-in happens whenever the
-// cached token is missing or about to expire. Given the tiny request volume
-// (a personal health coach queried a few times a day), that's cheaper to
-// reason about than token refresh and costs nothing worth optimizing.
+// The access token is cached two ways: a plain module-level variable for
+// the fast path (no I/O at all when warm), backed by the calling Durable
+// Object's own storage so the cache survives isolate churn -- a personal
+// coach queried a few times a day plausibly never keeps one isolate warm
+// long enough for a module-level-only cache to ever hit in practice. DO
+// storage reads are a local, sub-millisecond op, not a network call, so
+// checking it on a cold cache costs far less than a wasted Supabase
+// sign-in would.
 type SupabaseSession = {
 	accessToken: string;
 	expiresAt: number; // ms epoch
 };
 
-let cachedSession: SupabaseSession | null = null;
+const SESSION_STORAGE_KEY = "supabase_session";
+
+let memoryCache: SupabaseSession | null = null;
 
 // Two tool calls landing close together with no cached (or expired) session
 // would otherwise both pass the cache check before either's fetch resolves,
@@ -24,21 +29,31 @@ let cachedSession: SupabaseSession | null = null;
 // second caller awaits the first's request instead of starting its own.
 let signInPromise: Promise<string> | null = null;
 
-async function signIn(env: Env): Promise<string> {
+function isFresh(session: SupabaseSession | null | undefined, now: number): session is SupabaseSession {
+	return !!session && session.expiresAt - 30_000 > now;
+}
+
+async function signIn(env: Env, storage: DurableObjectStorage): Promise<string> {
 	const now = Date.now();
-	if (cachedSession && cachedSession.expiresAt - 30_000 > now) {
-		return cachedSession.accessToken;
+	if (isFresh(memoryCache, now)) {
+		return memoryCache.accessToken;
+	}
+
+	const stored = await storage.get<SupabaseSession>(SESSION_STORAGE_KEY);
+	if (isFresh(stored, now)) {
+		memoryCache = stored;
+		return stored.accessToken;
 	}
 
 	if (!signInPromise) {
-		signInPromise = doSignIn(env).finally(() => {
+		signInPromise = doSignIn(env, storage).finally(() => {
 			signInPromise = null;
 		});
 	}
 	return signInPromise;
 }
 
-async function doSignIn(env: Env): Promise<string> {
+async function doSignIn(env: Env, storage: DurableObjectStorage): Promise<string> {
 	const res = await fetch(`${env.SUPABASE_URL}/auth/v1/token?grant_type=password`, {
 		method: "POST",
 		headers: {
@@ -56,11 +71,13 @@ async function doSignIn(env: Env): Promise<string> {
 	}
 
 	const data = (await res.json()) as { access_token: string; expires_in: number };
-	cachedSession = {
+	const session: SupabaseSession = {
 		accessToken: data.access_token,
 		expiresAt: Date.now() + data.expires_in * 1000,
 	};
-	return cachedSession.accessToken;
+	memoryCache = session;
+	await storage.put(SESSION_STORAGE_KEY, session);
+	return session.accessToken;
 }
 
 /**
@@ -86,8 +103,13 @@ export function buildQuery(params: Array<[string, string]>): string {
 }
 
 /** GET against PostgREST. `resource` is the table/view, `query` from buildQuery(). */
-export async function pgrest(env: Env, resource: string, query: string): Promise<any> {
-	const token = await signIn(env);
+export async function pgrest(
+	env: Env,
+	storage: DurableObjectStorage,
+	resource: string,
+	query: string,
+): Promise<any> {
+	const token = await signIn(env, storage);
 	const res = await fetch(`${env.SUPABASE_URL}/rest/v1/${resource}?${query}`, {
 		headers: {
 			apikey: env.SUPABASE_ANON_KEY,

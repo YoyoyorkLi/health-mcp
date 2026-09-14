@@ -23,9 +23,17 @@ only to identify who's connecting.
   issue a token to any GitHub login other than `ALLOWED_GITHUB_LOGIN`, before
   the approval dialog even matters.
 - `src/supabase.ts` — signs in to Supabase Auth with the password grant,
-  caches the access token for the Worker isolate's lifetime, wraps PostgREST
-  GETs.
-- `src/pulse-tools.ts` — the 7 tools. See the plan doc §3 for the full table.
+  caches the access token in the calling Durable Object's own storage (so it
+  survives isolate churn, not just the current isolate's lifetime), wraps
+  PostgREST GETs.
+- `src/logic.ts` — pure date-math and aggregation logic (date-range
+  resolution, the `get_period_summary` rollup), split out from
+  `pulse-tools.ts` specifically so it's unit-testable with plain Vitest —
+  see Testing below.
+- `src/profile.ts` — `ATHLETE_PROFILE`, a small hand-maintained fact sheet
+  (age, training goal, injury status) behind the `get_athlete_profile` tool.
+  Not derived from Supabase; edit this file directly when any of it changes.
+- `src/pulse-tools.ts` — the 9 tools. See the plan doc §3 for the full table.
 - `src/workers-oauth-utils.ts`, `src/utils.ts` — template plumbing (CSRF,
   approval-dialog cookie, GitHub token exchange). Untouched.
 
@@ -127,6 +135,56 @@ npx @modelcontextprotocol/inspector@latest
 
 Enter `http://localhost:8788/mcp`, connect, go through the GitHub prompt,
 "List Tools".
+
+## Testing
+
+```bash
+npm test
+```
+
+Plain Vitest (no Cloudflare Workers pool needed) against `src/logic.ts` —
+date-range resolution, the span guard, and the `get_period_summary`
+aggregation, all pure functions with no bindings or I/O. This is what
+should have caught things like the `buildQuery` duplicate-key bug that
+shipped and got fixed mid-session the first time around, instead of relying
+on a live deploy and a manual tool call to notice. `pulse-tools.ts` itself
+(the `server.tool(...)` registrations and the PostgREST calls) isn't
+covered — that's integration-shaped and would need mocking `fetch`/the DO
+storage API to test meaningfully; not done here.
+
+## Known gotcha: reconnecting after a deploy
+
+**A `wrangler deploy` does not restart an already-connected MCP session.**
+`PulseCoachMCP` is a Durable Object; `init()` (where tools get registered)
+only runs when that DO instance starts, not on every request. An
+already-open Claude.ai chat or Claude Code session keeps running whatever
+tool list and code were live when it first connected — new tools won't
+appear, and fixes to existing tools' logic won't take effect — until that
+specific session gets a fresh connection.
+
+What actually works, roughly in order of effort:
+
+1. **New conversation.** Should be enough in principle, but wasn't fully
+   reliable in testing — a fresh chat sometimes still showed a stale tool
+   count, suggesting there's a connector-level cache above the per-session
+   one that a new chat alone doesn't always bypass.
+2. **Toggle the connector off and on** (in Claude Code: disable it, end the
+   turn, re-enable, end the turn again — the change only applies at turn
+   boundaries). Got a stale session from 7 tools to 8 in testing, but
+   plateaued there across repeated cycles rather than reaching the actual
+   current count — don't expect a second or third cycle to make further
+   progress once it stops moving.
+3. **Fully remove and re-add the connector** in Claude.ai (Settings →
+   Connectors → delete → Add custom connector → paste the URL again → redo
+   the GitHub approval). The most reliable option seen so far, since it
+   forces a genuinely new OAuth handshake and MCP session rather than
+   reusing anything pooled.
+
+If you're debugging "why doesn't the coach see tool X," check this before
+assuming the Worker code is wrong — confirm the actual deployment is
+current first (`npx wrangler deployments list`), which rules out a stale
+Cloudflare deploy in about 10 seconds and points squarely at the connector
+layer instead.
 
 ## Security note
 
